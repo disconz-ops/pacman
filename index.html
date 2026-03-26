@@ -171,7 +171,7 @@ const PLAYER_SPEED = 2.5;
 let player;
 function resetPlayer() {
   player = {
-    x: 13.5 * CELL, y: 23 * CELL,
+    x: 14 * CELL, y: 24 * CELL, // row 24 is the open corridor below the ghost house
     dx: 0, dy: 0,
     nextDx: 0, nextDy: 0,
     mouthAngle: 0.25,
@@ -201,19 +201,32 @@ let frightenedFlash = false;
 let ghostEatenScore = 200;
 
 function resetGhosts() {
-  ghosts = GHOST_COLORS.map((color, i) => ({
-    x: (12 + i % 4) * CELL,
-    y: (i === 0 ? 11 : 13) * CELL,
-    dx: 0, dy: 0,
-    color,
-    name: GHOST_NAMES[i],
-    mode: 'house', // house | scatter | chase | frightened | eaten
-    houseTimer: i * 3000 + 1000,
-    dead: false,
-    eyeDir: {dx: 1, dy: 0},
-    scatterTarget: SCATTER_TARGETS[i],
-  }));
+  // Ghost house interior is at rows 12-14, cols 11-14 (cell type '5')
+  // Row 10 is the open corridor just above the ghost house
+  ghosts = [
+    { // Blinky - starts outside house, immediately active
+      x: 14 * CELL, y: 10 * CELL, dx: 1, dy: 0,
+      color: GHOST_COLORS[0], name: 'Blinky', mode: 'scatter', houseTimer: 0,
+      eyeDir: {dx: 1, dy: 0}, scatterTarget: SCATTER_TARGETS[0],
+    },
+    { // Pinky - inside house
+      x: 12 * CELL, y: 12 * CELL, dx: 0, dy: 0,
+      color: GHOST_COLORS[1], name: 'Pinky', mode: 'house', houseTimer: 3000,
+      eyeDir: {dx: 1, dy: 0}, scatterTarget: SCATTER_TARGETS[1],
+    },
+    { // Inky - inside house
+      x: 13 * CELL, y: 12 * CELL, dx: 0, dy: 0,
+      color: GHOST_COLORS[2], name: 'Inky', mode: 'house', houseTimer: 6000,
+      eyeDir: {dx: 1, dy: 0}, scatterTarget: SCATTER_TARGETS[2],
+    },
+    { // Clyde - inside house
+      x: 14 * CELL, y: 12 * CELL, dx: 0, dy: 0,
+      color: GHOST_COLORS[3], name: 'Clyde', mode: 'house', houseTimer: 9000,
+      eyeDir: {dx: 1, dy: 0}, scatterTarget: SCATTER_TARGETS[3],
+    },
+  ];
   frightenedTimer = 0;
+  ghostEatenScore = 200;
 }
 
 // ─── DIRECTION HELPERS ───────────────────────────────────────────────────────
@@ -357,9 +370,9 @@ function moveGhost(ghost, dt) {
     ghost.houseTimer -= dt;
     if (ghost.houseTimer <= 0) {
       ghost.mode = 'scatter';
-      ghost.x = 13.5 * CELL;
-      ghost.y = 11 * CELL;
-      ghost.dx = 0; ghost.dy = -1;
+      ghost.x = 14 * CELL; // grid-aligned, open corridor above ghost house
+      ghost.y = 10 * CELL;
+      ghost.dx = 1; ghost.dy = 0;
     }
     return;
   }
