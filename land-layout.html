@@ -216,7 +216,7 @@ button.danger:hover { background: #f38ba820; }
 
 <div class="main">
   <div class="sidebar-left">
-    <button class="tool-btn active" id="tb-select" onclick="T.setTool('select')" title="">
+    <button class="tool-btn active" id="tb-select" onclick="T.setTool('select')">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
         <path d="M2 2l5 12 2-5 5-2z"/>
       </svg>
@@ -274,8 +274,8 @@ button.danger:hover { background: #f38ba820; }
     <div class="panel">
       <div class="panel-hdr">Parameters</div>
       <div class="panel-body">
-        <div class="param-row"><label>Min Area</label><input type="number" id="p-minArea" value="300" min="1"><span class="param-unit">m²</span></div>
-        <div class="param-row"><label>Max Area</label><input type="number" id="p-maxArea" value="800" min="1"><span class="param-unit">m²</span></div>
+        <div class="param-row"><label>Min Area</label><input type="number" id="p-minArea" value="300" min="1"><span class="param-unit">m&#178;</span></div>
+        <div class="param-row"><label>Max Area</label><input type="number" id="p-maxArea" value="800" min="1"><span class="param-unit">m&#178;</span></div>
         <div class="param-row"><label>Min Frontage</label><input type="number" id="p-minFront" value="12" min="1"><span class="param-unit">m</span></div>
         <div class="param-row"><label>Max Frontage</label><input type="number" id="p-maxFront" value="25" min="1"><span class="param-unit">m</span></div>
         <div class="param-row"><label>Min Depth</label><input type="number" id="p-minDepth" value="20" min="1"><span class="param-unit">m</span></div>
@@ -309,685 +309,640 @@ button.danger:hover { background: #f38ba820; }
 
 <script>
 // ================================================================
-// Land Plot Layout Tool  –  interactive canvas + DXF export
+// Land Plot Layout Tool
+// All shapes stored as polygon point arrays { points:[{x,y},...] }
+// so any corner can be dragged freely with the Select tool.
 // ================================================================
 
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 const wrap   = document.getElementById('canvasWrap');
 
-// ── View state ──────────────────────────────────────────────────
-let scale   = 8;   // px per metre
-let offX    = 80;
-let offY    = 80;
+// ── View ─────────────────────────────────────────────────────────
+let scale = 8, offX = 80, offY = 80;
 
-// ── Data ────────────────────────────────────────────────────────
-let boundary = null;          // { x,y,w,h } in metres
-let roads    = [];            // [{ id,x,y,w,h,dir }]
-let plots    = [];            // [{ id,num,x,y,w,h,area,manual }]
-let selected = null;          // id
+// ── Data ─────────────────────────────────────────────────────────
+// Shapes: { id, points:[{x,y},...] }   (world metres)
+// Plots additionally: { num, area, manual }
+let boundary = null;
+let roads    = [];
+let plots    = [];
+let selected = null;   // item id
 
-// ── Interaction state ───────────────────────────────────────────
-let tool     = 'select';
-let drawing  = false;
-let dStart   = null;          // { wx,wy }
-let dCur     = null;          // { wx,wy }
-let panning  = false;
-let panStart = null;          // { sx,sy,ox,oy }
+// ── Interaction ──────────────────────────────────────────────────
+let tool      = 'select';
+let drawing   = false;
+let dStart    = null;   // {wx,wy}
+let dCur      = null;   // {wx,wy}
+let panning   = false;
+let panStart  = null;   // {sx,sy,ox,oy}
 let spaceDown = false;
+let dragNode  = null;   // {itemId, nodeIdx} – corner being dragged
+let hoverNode = null;   // {itemId, nodeIdx} – corner under cursor
 
-// ── History ─────────────────────────────────────────────────────
-let history  = [];
-let histIdx  = -1;
-
+// ── History ──────────────────────────────────────────────────────
+let history = [], histIdx = -1;
 let _uid = 0;
 function uid() { return 'u' + (++_uid); }
 
-// ── Params ──────────────────────────────────────────────────────
-function getP() {
-  const g = id => +document.getElementById(id).value || 0;
-  return {
-    minArea:  g('p-minArea')  || 300,
-    maxArea:  g('p-maxArea')  || 800,
-    minFront: g('p-minFront') || 12,
-    maxFront: g('p-maxFront') || 25,
-    minDepth: g('p-minDepth') || 20,
-    maxDepth: g('p-maxDepth') || 40,
-    roadW:    g('p-roadW')    || 10,
-    startN:   g('p-startN')   || 1,
-  };
+// ── Geometry ─────────────────────────────────────────────────────
+function rectPts(x, y, w, h) {
+  return [{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}];
 }
+function bbox(pts) {
+  const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+  return { x:Math.min(...xs), y:Math.min(...ys),
+           w:Math.max(...xs)-Math.min(...xs), h:Math.max(...ys)-Math.min(...ys) };
+}
+function polyArea(pts) {
+  let a = 0; const n = pts.length;
+  for (let i=0; i<n; i++) {
+    const j = (i+1)%n;
+    a += pts[i].x*pts[j].y - pts[j].x*pts[i].y;
+  }
+  return Math.abs(a)/2;
+}
+function ptInPoly(px, py, pts) {
+  let inside = false; const n = pts.length;
+  for (let i=0,j=n-1; i<n; j=i++) {
+    const xi=pts[i].x,yi=pts[i].y,xj=pts[j].x,yj=pts[j].y;
+    if (((yi>py)!==(yj>py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi))
+      inside = !inside;
+  }
+  return inside;
+}
+function centroid(pts) {
+  return { x:pts.reduce((s,p)=>s+p.x,0)/pts.length,
+           y:pts.reduce((s,p)=>s+p.y,0)/pts.length };
+}
+function sdist(ax,ay,bx,by) { return Math.hypot(ax-bx,ay-by); }
 
-// ── Coord transforms ────────────────────────────────────────────
-function w2s(wx, wy) { return { x: wx * scale + offX, y: wy * scale + offY }; }
-function s2w(sx, sy) { return { wx: (sx - offX) / scale, wy: (sy - offY) / scale }; }
-function snap(v, g = 0.5) { return Math.round(v / g) * g; }
+// ── Transforms ───────────────────────────────────────────────────
+function w2s(wx,wy) { return {x:wx*scale+offX, y:wy*scale+offY}; }
+function s2w(sx,sy) { return {wx:(sx-offX)/scale, wy:(sy-offY)/scale}; }
+function snap(v,g=0.5){ return Math.round(v/g)*g; }
 
-// ── History ─────────────────────────────────────────────────────
+// ── History ──────────────────────────────────────────────────────
 function saveSnap() {
-  const s = JSON.stringify({ boundary, roads, plots });
-  history = history.slice(0, histIdx + 1);
+  const s = JSON.stringify({boundary,roads,plots});
+  history = history.slice(0, histIdx+1);
   history.push(s);
-  histIdx = history.length - 1;
+  histIdx = history.length-1;
 }
 function restoreSnap() {
   const s = JSON.parse(history[histIdx]);
-  boundary = s.boundary; roads = s.roads; plots = s.plots;
+  boundary=s.boundary; roads=s.roads; plots=s.plots;
+  dragNode=null; hoverNode=null;
   refreshUI(); draw();
 }
-function undo() { if (histIdx > 0) { histIdx--; restoreSnap(); } }
-function redo() { if (histIdx < history.length - 1) { histIdx++; restoreSnap(); } }
+function undo() { if (histIdx>0)               { histIdx--; restoreSnap(); } }
+function redo() { if (histIdx<history.length-1) { histIdx++; restoreSnap(); } }
 
-// ── Tool management ─────────────────────────────────────────────
-const toolNames = {
-  select: 'Select', boundary: 'Site Boundary',
-  'road-h': 'Horizontal Road', 'road-v': 'Vertical Road',
-  plot: 'Manual Plot', pan: 'Pan'
+// ── Tool ─────────────────────────────────────────────────────────
+const TOOL_NAMES = {
+  select:'Select', boundary:'Site Boundary',
+  'road-h':'Horizontal Road','road-v':'Vertical Road',
+  plot:'Manual Plot', pan:'Pan'
 };
 function setTool(t) {
-  tool = t;
-  document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-  const btn = document.getElementById('tb-' + t);
+  tool=t; dragNode=null; hoverNode=null;
+  document.querySelectorAll('.tool-btn').forEach(b=>b.classList.remove('active'));
+  const btn = document.getElementById('tb-'+t);
   if (btn) btn.classList.add('active');
-  document.getElementById('st-tool').textContent = toolNames[t] || t;
-  wrap.style.cursor = t === 'pan' ? 'grab' : t === 'select' ? 'default' : 'crosshair';
+  document.getElementById('st-tool').textContent = TOOL_NAMES[t]||t;
+  wrap.style.cursor = t==='pan'?'grab': t==='select'?'default':'crosshair';
 }
 
-// ── Status message ───────────────────────────────────────────────
-function setMsg(msg, ok = true) {
+// ── Status ───────────────────────────────────────────────────────
+function setMsg(msg, ok=true) {
   const el = document.getElementById('status-msg');
-  el.textContent = msg;
-  el.style.color = ok ? '#a6e3a1' : '#f38ba8';
-  clearTimeout(el._t);
-  el._t = setTimeout(() => { el.textContent = ''; }, 3500);
+  el.textContent=msg; el.style.color=ok?'#a6e3a1':'#f38ba8';
+  clearTimeout(el._t); el._t=setTimeout(()=>{el.textContent='';},3500);
 }
 
-// ── Auto-layout algorithm ────────────────────────────────────────
+// ── Item lookup ──────────────────────────────────────────────────
+function findItem(id) {
+  if (boundary&&boundary.id===id) return boundary;
+  return plots.find(p=>p.id===id)||roads.find(r=>r.id===id)||null;
+}
+
+// ── Node hit detection ───────────────────────────────────────────
+const NODE_R = 10; // screen px hit radius
+function nodeAt(sx, sy) {
+  if (!selected) return null;
+  const item = findItem(selected);
+  if (!item) return null;
+  for (let i=0; i<item.points.length; i++) {
+    const s = w2s(item.points[i].x, item.points[i].y);
+    if (sdist(sx,sy,s.x,s.y)<=NODE_R) return i;
+  }
+  return null;
+}
+
+// ── Params ───────────────────────────────────────────────────────
+function getP() {
+  const g = id => +document.getElementById(id).value||0;
+  return {
+    minArea:  g('p-minArea') ||300,
+    maxArea:  g('p-maxArea') ||800,
+    minFront: g('p-minFront')||12,
+    maxFront: g('p-maxFront')||25,
+    minDepth: g('p-minDepth')||20,
+    maxDepth: g('p-maxDepth')||40,
+    roadW:    g('p-roadW')   ||10,
+    startN:   g('p-startN')  ||1,
+  };
+}
+
+// ── Auto-layout ──────────────────────────────────────────────────
 function autoLayout() {
   if (!boundary) { setMsg('Draw a site boundary first.', false); return; }
   const p = getP();
-
-  // Compute free blocks by subtracting each road from boundary
-  let blocks = [{ x: boundary.x, y: boundary.y, w: boundary.w, h: boundary.h }];
+  const bb = bbox(boundary.points);
+  let blocks = [{x:bb.x, y:bb.y, w:bb.w, h:bb.h}];
   for (const road of roads) {
+    const rb = bbox(road.points);
     const next = [];
-    for (const bl of blocks) next.push(...subtractRect(bl, road));
+    for (const bl of blocks) next.push(...subRect(bl,rb));
     blocks = next;
   }
-  blocks = blocks.filter(b => b.w >= p.minFront * 0.8 && b.h >= p.minDepth * 0.8);
-
+  blocks = blocks.filter(b=>b.w>=p.minFront*0.8&&b.h>=p.minDepth*0.8);
   const newPlots = [];
-  for (const bl of blocks) newPlots.push(...subdivideBlock(bl, p));
-
-  // Renumber from startN
-  newPlots.forEach((pl, i) => { pl.num = p.startN + i; });
-
-  saveSnap();
-  plots = newPlots;
-  refreshUI(); draw();
-  setMsg(`Auto-layout: ${newPlots.length} lot${newPlots.length !== 1 ? 's' : ''} created.`);
-}
-
-// Clip rectangle B out of rectangle A, returning up to 4 surrounding pieces
-function subtractRect(a, b) {
-  const ax1 = a.x, ax2 = a.x + a.w, ay1 = a.y, ay2 = a.y + a.h;
-  const bx1 = b.x, bx2 = b.x + b.w, by1 = b.y, by2 = b.y + b.h;
-  if (bx2 <= ax1 || bx1 >= ax2 || by2 <= ay1 || by1 >= ay2) return [a];
-
-  const out = [];
-  const ox1 = Math.max(ax1, bx1), ox2 = Math.min(ax2, bx2);
-  if (bx1 > ax1) out.push({ x: ax1, y: ay1, w: bx1 - ax1, h: a.h });
-  if (bx2 < ax2) out.push({ x: bx2, y: ay1, w: ax2 - bx2, h: a.h });
-  if (by1 > ay1) out.push({ x: ox1, y: ay1, w: ox2 - ox1, h: by1 - ay1 });
-  if (by2 < ay2) out.push({ x: ox1, y: by2, w: ox2 - ox1, h: ay2 - by2 });
-  return out.filter(r => r.w > 0.1 && r.h > 0.1);
-}
-
-function subdivideBlock(bl, p) {
-  const result = [];
-  const { minFront, maxFront, minDepth, maxDepth, minArea } = p;
-
-  // Choose orientation: plots face the longer edge (frontage along long side)
-  // If block wider: frontage along X, depth along Y. If taller: frontage along Y, depth along X.
-  const landscape = bl.w >= bl.h;
-  const blockFront = landscape ? bl.w : bl.h;
-  const blockDepth = landscape ? bl.h : bl.w;
-
-  if (blockDepth < minDepth * 0.8) return [];
-
-  // Back-to-back rows if block is deep enough
-  const rows = (blockDepth >= maxDepth * 1.8) ? 2 : 1;
-  const rowDepth = blockDepth / rows;
-  if (rowDepth < minDepth * 0.8) return [];
-
-  // Number of plots: aim for ideal frontage in the middle of range
-  const idealFront = (minFront + maxFront) / 2;
-  let n = Math.max(1, Math.round(blockFront / idealFront));
-  let pFront = blockFront / n;
-  while (pFront < minFront && n > 1) { n--; pFront = blockFront / n; }
-  while (pFront > maxFront)          { n++; pFront = blockFront / n; }
-  if (pFront < minFront * 0.8) return [];
-
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < n; col++) {
-      let px, py, pw, ph;
-      if (landscape) {
-        px = bl.x + col * pFront;
-        py = bl.y + row * rowDepth;
-        pw = pFront;
-        ph = rowDepth;
-      } else {
-        px = bl.x + row * rowDepth;
-        py = bl.y + col * pFront;
-        pw = rowDepth;
-        ph = pFront;
-      }
-      const area = pw * ph;
-      if (area < minArea * 0.7) continue;
-      result.push({ id: uid(), num: 0, x: px, y: py, w: pw, h: ph, area: Math.round(area), manual: false });
+  for (const bl of blocks) {
+    for (const r of subdivide(bl,p)) {
+      newPlots.push({id:uid(),num:0,points:rectPts(r.x,r.y,r.w,r.h),area:Math.round(r.w*r.h),manual:false});
     }
   }
-  return result;
+  newPlots.forEach((pl,i)=>{ pl.num=p.startN+i; });
+  saveSnap(); plots=newPlots;
+  refreshUI(); draw();
+  setMsg(`Auto-layout: ${newPlots.length} lot${newPlots.length!==1?'s':''} created.`);
+}
+
+function subRect(a, b) {
+  const ax1=a.x,ax2=a.x+a.w,ay1=a.y,ay2=a.y+a.h;
+  const bx1=b.x,bx2=b.x+b.w,by1=b.y,by2=b.y+b.h;
+  if (bx2<=ax1||bx1>=ax2||by2<=ay1||by1>=ay2) return [a];
+  const out=[];
+  const ox1=Math.max(ax1,bx1),ox2=Math.min(ax2,bx2);
+  if (bx1>ax1) out.push({x:ax1,y:ay1,w:bx1-ax1,h:a.h});
+  if (bx2<ax2) out.push({x:bx2,y:ay1,w:ax2-bx2,h:a.h});
+  if (by1>ay1) out.push({x:ox1,y:ay1,w:ox2-ox1,h:by1-ay1});
+  if (by2<ay2) out.push({x:ox1,y:by2,w:ox2-ox1,h:ay2-by2});
+  return out.filter(r=>r.w>0.1&&r.h>0.1);
+}
+
+function subdivide(bl, p) {
+  const {minFront,maxFront,minDepth,maxDepth,minArea}=p;
+  const landscape=bl.w>=bl.h;
+  const blockFront=landscape?bl.w:bl.h;
+  const blockDepth=landscape?bl.h:bl.w;
+  if (blockDepth<minDepth*0.8) return [];
+  const rows=(blockDepth>=maxDepth*1.8)?2:1;
+  const rowDepth=blockDepth/rows;
+  if (rowDepth<minDepth*0.8) return [];
+  const ideal=(minFront+maxFront)/2;
+  let n=Math.max(1,Math.round(blockFront/ideal));
+  let pF=blockFront/n;
+  while (pF<minFront&&n>1){n--;pF=blockFront/n;}
+  while (pF>maxFront)      {n++;pF=blockFront/n;}
+  if (pF<minFront*0.8) return [];
+  const out=[];
+  for (let row=0;row<rows;row++) {
+    for (let col=0;col<n;col++) {
+      let px,py,pw,ph;
+      if (landscape){px=bl.x+col*pF;py=bl.y+row*rowDepth;pw=pF;ph=rowDepth;}
+      else          {px=bl.x+row*rowDepth;py=bl.y+col*pF;pw=rowDepth;ph=pF;}
+      if (pw*ph>=minArea*0.7) out.push({x:px,y:py,w:pw,h:ph});
+    }
+  }
+  return out;
 }
 
 // ── Clear ────────────────────────────────────────────────────────
 function clearAll() {
   if (!confirm('Clear everything?')) return;
   saveSnap();
-  boundary = null; roads = []; plots = []; selected = null;
-  refreshUI(); draw();
+  boundary=null;roads=[];plots=[];selected=null;dragNode=null;hoverNode=null;
+  refreshUI();draw();
 }
 
 // ── DXF Export ───────────────────────────────────────────────────
 function exportDXF() {
-  if (!boundary && plots.length === 0 && roads.length === 0) {
-    setMsg('Nothing to export.', false); return;
-  }
-  const L = [];
-  const push = (...a) => a.forEach(v => L.push(v));
+  if (!boundary&&!plots.length&&!roads.length) {setMsg('Nothing to export.',false);return;}
+  const L=[];
+  const p=(...a)=>a.forEach(v=>L.push(v));
+  p('0','SECTION','2','HEADER','9','$ACADVER','1','AC1015','9','$INSUNITS','70','6','0','ENDSEC');
+  p('0','SECTION','2','TABLES','0','TABLE','2','LAYER','70','10');
+  const lyr=(n,c)=>p('0','LAYER','2',n,'70','0','62',String(c),'6','CONTINUOUS');
+  lyr('0',7);lyr('BOUNDARY',7);lyr('ROADS',30);lyr('PLOT-OUTLINE',5);lyr('PLOT-TEXT',2);lyr('ROAD-TEXT',3);
+  p('0','ENDTAB','0','ENDSEC','0','SECTION','2','ENTITIES');
 
-  // HEADER
-  push('0','SECTION','2','HEADER',
-    '9','$ACADVER','1','AC1015',
-    '9','$INSUNITS','70','6',
-    '0','ENDSEC');
-
-  // TABLES – layer definitions
-  push('0','SECTION','2','TABLES','0','TABLE','2','LAYER','70','10');
-  const defLayer = (name, color) =>
-    push('0','LAYER','2',name,'70','0','62',String(color),'6','CONTINUOUS');
-  defLayer('0',7);
-  defLayer('BOUNDARY',7);
-  defLayer('ROADS',30);
-  defLayer('PLOT-OUTLINE',5);
-  defLayer('PLOT-TEXT',2);
-  defLayer('ROAD-TEXT',3);
-  push('0','ENDTAB','0','ENDSEC');
-
-  // ENTITIES
-  push('0','SECTION','2','ENTITIES');
-
-  const addPoly = (layer, x, y, w, h) => {
-    push('0','LWPOLYLINE','8',layer,'90','4','70','1');
-    push('10',x.toFixed(3),'20',y.toFixed(3));
-    push('10',(x+w).toFixed(3),'20',y.toFixed(3));
-    push('10',(x+w).toFixed(3),'20',(y+h).toFixed(3));
-    push('10',x.toFixed(3),'20',(y+h).toFixed(3));
+  const poly=(layer,pts)=>{
+    p('0','LWPOLYLINE','8',layer,'90',String(pts.length),'70','1');
+    pts.forEach(pt=>p('10',pt.x.toFixed(3),'20',pt.y.toFixed(3)));
   };
-  const addText = (layer, x, y, h, txt) => {
-    push('0','TEXT','8',layer,
-      '10',x.toFixed(3),'20',y.toFixed(3),'30','0',
-      '40',h.toFixed(3),'1',String(txt),
-      '72','1','11',x.toFixed(3),'21',y.toFixed(3),'31','0');
+  const txt=(layer,x,y,h,s)=>{
+    p('0','TEXT','8',layer,'10',x.toFixed(3),'20',y.toFixed(3),'30','0',
+      '40',h.toFixed(3),'1',String(s),'72','1','11',x.toFixed(3),'21',y.toFixed(3),'31','0');
   };
 
-  if (boundary) addPoly('BOUNDARY', boundary.x, boundary.y, boundary.w, boundary.h);
-
-  roads.forEach((r, i) => {
-    addPoly('ROADS', r.x, r.y, r.w, r.h);
-    addText('ROAD-TEXT', r.x + r.w/2, r.y + r.h/2, 2, 'ROAD');
+  if (boundary) poly('BOUNDARY',boundary.points);
+  roads.forEach(r=>{
+    poly('ROADS',r.points);
+    const c=centroid(r.points); txt('ROAD-TEXT',c.x,c.y,2,'ROAD');
   });
-
-  plots.forEach(pl => {
-    addPoly('PLOT-OUTLINE', pl.x, pl.y, pl.w, pl.h);
-    const cx = pl.x + pl.w / 2;
-    const cy = pl.y + pl.h / 2;
-    const fs = Math.min(1.8, pl.w * 0.12, pl.h * 0.12);
-    addText('PLOT-TEXT', cx, cy + fs * 1.4, fs * 1.2, `Lot ${pl.num}`);
-    addText('PLOT-TEXT', cx, cy,             fs,       `${pl.area} m\xB2`);
-    addText('PLOT-TEXT', cx, cy - fs * 1.4, fs * 0.85,
-      `${pl.w.toFixed(1)}m \xD7 ${pl.h.toFixed(1)}m`);
+  plots.forEach(pl=>{
+    poly('PLOT-OUTLINE',pl.points);
+    const c=centroid(pl.points);
+    const bb=bbox(pl.points);
+    const fs=Math.min(1.8,bb.w*0.12,bb.h*0.12);
+    txt('PLOT-TEXT',c.x,c.y+fs*1.4,fs*1.2,`Lot ${pl.num}`);
+    txt('PLOT-TEXT',c.x,c.y,fs,`${pl.area} m\xB2`);
+    txt('PLOT-TEXT',c.x,c.y-fs*1.4,fs*0.85,`${bb.w.toFixed(1)}m \xD7 ${bb.h.toFixed(1)}m`);
   });
-
-  push('0','ENDSEC','0','EOF');
-
-  const blob = new Blob([L.join('\n')], { type: 'application/dxf' });
-  const a = Object.assign(document.createElement('a'), {
-    href: URL.createObjectURL(blob), download: 'land-layout.dxf'
-  });
-  a.click();
-  URL.revokeObjectURL(a.href);
-  setMsg('DXF file exported.');
+  p('0','ENDSEC','0','EOF');
+  const blob=new Blob([L.join('\n')],{type:'application/dxf'});
+  const a=Object.assign(document.createElement('a'),{href:URL.createObjectURL(blob),download:'land-layout.dxf'});
+  a.click(); URL.revokeObjectURL(a.href);
+  setMsg('DXF exported.');
 }
 
-// ── UI refresh ───────────────────────────────────────────────────
-const PLOT_COLORS = ['#89b4fa','#cba6f7','#f38ba8','#fab387','#f9e2af','#a6e3a1','#94e2d5','#74c7ec'];
-function pc(num) { return PLOT_COLORS[(num - 1) % PLOT_COLORS.length]; }
+// ── UI list ───────────────────────────────────────────────────────
+const COLORS=['#89b4fa','#cba6f7','#f38ba8','#fab387','#f9e2af','#a6e3a1','#94e2d5','#74c7ec'];
+function pc(num){return COLORS[(num-1)%COLORS.length];}
 
 function refreshUI() {
-  const list = document.getElementById('plotList');
-  list.innerHTML = '';
-
-  roads.forEach((r, i) => {
-    const div = document.createElement('div');
-    div.className = 'plot-item' + (selected === r.id ? ' sel' : '');
-    div.onclick = () => { selected = r.id; refreshUI(); draw(); };
-    div.innerHTML = `
-      <div class="plot-badge" style="background:#a6e3a1;color:#1e1e2e">R${i+1}</div>
-      <div class="plot-info">
-        <div class="plot-area-text">Road</div>
-        <div class="plot-dim-text">${r.w.toFixed(1)}&times;${r.h.toFixed(1)} m</div>
-      </div>
-      <button class="del-btn" onclick="event.stopPropagation();delRoad('${r.id}')">&#10005;</button>
-    `;
-    list.appendChild(div);
+  const list=document.getElementById('plotList');
+  list.innerHTML='';
+  roads.forEach((r,i)=>{
+    const bb=bbox(r.points);
+    const d=document.createElement('div');
+    d.className='plot-item'+(selected===r.id?' sel':'');
+    d.onclick=()=>{selected=r.id;hoverNode=null;refreshUI();draw();};
+    d.innerHTML=`<div class="plot-badge" style="background:#a6e3a1;color:#1e1e2e">R${i+1}</div>
+      <div class="plot-info"><div class="plot-area-text">Road</div>
+      <div class="plot-dim-text">${bb.w.toFixed(1)}&times;${bb.h.toFixed(1)} m</div></div>
+      <button class="del-btn" onclick="event.stopPropagation();delRoad('${r.id}')">&#10005;</button>`;
+    list.appendChild(d);
+  });
+  plots.forEach(pl=>{
+    const bb=bbox(pl.points);
+    const col=pc(pl.num);
+    const d=document.createElement('div');
+    d.className='plot-item'+(selected===pl.id?' sel':'');
+    d.onclick=()=>{selected=pl.id;hoverNode=null;refreshUI();draw();};
+    d.innerHTML=`<div class="plot-badge" style="background:${col};color:#1e1e2e">${pl.num}</div>
+      <div class="plot-info"><div class="plot-area-text">${pl.area.toLocaleString()} m&#178;</div>
+      <div class="plot-dim-text">${bb.w.toFixed(1)}&times;${bb.h.toFixed(1)} m</div></div>
+      <button class="del-btn" onclick="event.stopPropagation();delPlot('${pl.id}')">&#10005;</button>`;
+    list.appendChild(d);
   });
 
-  plots.forEach(pl => {
-    const col = pc(pl.num);
-    const div = document.createElement('div');
-    div.className = 'plot-item' + (selected === pl.id ? ' sel' : '');
-    div.onclick = () => { selected = pl.id; refreshUI(); draw(); };
-    div.innerHTML = `
-      <div class="plot-badge" style="background:${col};color:#1e1e2e">${pl.num}</div>
-      <div class="plot-info">
-        <div class="plot-area-text">${pl.area.toLocaleString()} m&sup2;</div>
-        <div class="plot-dim-text">${pl.w.toFixed(1)}&times;${pl.h.toFixed(1)} m</div>
-      </div>
-      <button class="del-btn" onclick="event.stopPropagation();delPlot('${pl.id}')">&#10005;</button>
-    `;
-    list.appendChild(div);
-  });
-
-  // Summary
-  const siteArea  = boundary ? Math.round(boundary.w * boundary.h) : 0;
-  const roadArea  = Math.round(roads.reduce((s,r) => s + r.w*r.h, 0));
-  const plotArea  = plots.reduce((s,p) => s + p.area, 0);
-  const avgPlot   = plots.length ? Math.round(plotArea / plots.length) : 0;
-  document.getElementById('summary').innerHTML = boundary ? `
+  const sa=boundary?Math.round(polyArea(boundary.points)):0;
+  const ra=Math.round(roads.reduce((s,r)=>s+polyArea(r.points),0));
+  const pa=plots.reduce((s,p)=>s+p.area,0);
+  const avg=plots.length?Math.round(pa/plots.length):0;
+  document.getElementById('summary').innerHTML=boundary?`
     <div class="summary-grid">
-      <span class="lbl">Site area</span><span class="val">${siteArea.toLocaleString()} m&sup2;</span>
-      <span class="lbl">Road area</span><span class="val">${roadArea.toLocaleString()} m&sup2;</span>
-      <span class="lbl">Lot area</span><span class="val">${plotArea.toLocaleString()} m&sup2;</span>
+      <span class="lbl">Site area</span><span class="val">${sa.toLocaleString()} m&#178;</span>
+      <span class="lbl">Road area</span><span class="val">${ra.toLocaleString()} m&#178;</span>
+      <span class="lbl">Lot area</span><span class="val">${pa.toLocaleString()} m&#178;</span>
       <span class="lbl">Lots</span><span class="val">${plots.length}</span>
-      ${plots.length ? `<span class="lbl">Avg lot</span><span class="val">${avgPlot.toLocaleString()} m&sup2;</span>` : ''}
-    </div>
-  ` : '<div style="font-size:11px;color:#585b70">Draw a site boundary to begin.</div>';
-
-  document.getElementById('st-lots').textContent = plots.length;
+      ${plots.length?`<span class="lbl">Avg lot</span><span class="val">${avg.toLocaleString()} m&#178;</span>`:''}
+    </div>`:`<div style="font-size:11px;color:#585b70">Draw a site boundary to begin.</div>`;
+  document.getElementById('st-lots').textContent=plots.length;
 }
 
 function delRoad(id) {
-  saveSnap(); roads = roads.filter(r => r.id !== id);
-  if (selected === id) selected = null;
-  refreshUI(); draw();
+  saveSnap(); roads=roads.filter(r=>r.id!==id);
+  if (selected===id){selected=null;dragNode=null;hoverNode=null;}
+  refreshUI();draw();
 }
 function delPlot(id) {
-  saveSnap(); plots = plots.filter(p => p.id !== id);
-  if (selected === id) selected = null;
-  refreshUI(); draw();
+  saveSnap(); plots=plots.filter(p=>p.id!==id);
+  if (selected===id){selected=null;dragNode=null;hoverNode=null;}
+  refreshUI();draw();
 }
 
 // ── Rendering ────────────────────────────────────────────────────
+function drawPoly(pts, fill, stroke, lw, dash=[]) {
+  ctx.beginPath();
+  pts.forEach((pt,i)=>{const s=w2s(pt.x,pt.y);i===0?ctx.moveTo(s.x,s.y):ctx.lineTo(s.x,s.y);});
+  ctx.closePath();
+  ctx.fillStyle=fill; ctx.fill();
+  ctx.setLineDash(dash); ctx.strokeStyle=stroke; ctx.lineWidth=lw; ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawHandles(pts) {
+  const NR=5;
+  pts.forEach((pt,i)=>{
+    const s=w2s(pt.x,pt.y);
+    const isHov=hoverNode&&hoverNode.nodeIdx===i;
+    const isDrg=dragNode&&dragNode.nodeIdx===i;
+    const r=(isHov||isDrg)?NR+2:NR;
+    ctx.fillStyle  =isDrg?'#f9e2af':isHov?'#cba6f7':'#ffffff';
+    ctx.strokeStyle=isDrg?'#f59e0b':isHov?'#89b4fa':'#89b4fa';
+    ctx.lineWidth=1.5;
+    ctx.fillRect(s.x-r,s.y-r,r*2,r*2);
+    ctx.strokeRect(s.x-r,s.y-r,r*2,r*2);
+    if (isHov) {
+      ctx.fillStyle='#cdd6f4'; ctx.font='9px monospace'; ctx.textAlign='left';
+      ctx.fillText(`${pt.x.toFixed(1)},${pt.y.toFixed(1)}`,s.x+r+3,s.y+3);
+    }
+  });
+}
+
 function draw() {
-  const W = canvas.width, H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
-
-  // Background
-  ctx.fillStyle = '#0f0f1a';
-  ctx.fillRect(0, 0, W, H);
-
-  drawGrid(W, H);
+  const W=canvas.width,H=canvas.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#0f0f1a'; ctx.fillRect(0,0,W,H);
+  drawGrid(W,H);
 
   // Boundary
   if (boundary) {
-    const s = w2s(boundary.x, boundary.y);
-    const e = w2s(boundary.x + boundary.w, boundary.y + boundary.h);
-    ctx.fillStyle   = '#ffffff06';
-    ctx.fillRect(s.x, s.y, e.x - s.x, e.y - s.y);
-    ctx.strokeStyle = '#89b4fa';
-    ctx.lineWidth   = 2;
-    ctx.setLineDash([8, 4]);
-    ctx.strokeRect(s.x, s.y, e.x - s.x, e.y - s.y);
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#89b4fa55';
-    ctx.font = '11px Segoe UI';
-    ctx.fillText('SITE BOUNDARY', s.x + 5, s.y + 14);
+    const isSel=selected===boundary.id;
+    drawPoly(boundary.points,'#ffffff06',isSel?'#89b4fa':'#89b4fa88',isSel?2:1.5,[8,4]);
+    const bb=bbox(boundary.points);
+    const s=w2s(bb.x,bb.y);
+    ctx.fillStyle='#89b4fa55'; ctx.font='11px Segoe UI';
+    ctx.textAlign='left'; ctx.fillText('SITE BOUNDARY',s.x+5,s.y+14);
+    if (isSel) drawHandles(boundary.points);
   }
 
   // Roads
   for (const r of roads) {
-    const s = w2s(r.x, r.y), e = w2s(r.x + r.w, r.y + r.h);
-    const sw = e.x - s.x, sh = e.y - s.y;
-    const isSel = selected === r.id;
-    ctx.fillStyle   = isSel ? '#a6e3a130' : '#a6e3a118';
-    ctx.fillRect(s.x, s.y, sw, sh);
-    ctx.strokeStyle = isSel ? '#a6e3a1' : '#a6e3a170';
-    ctx.lineWidth   = isSel ? 2 : 1;
-    ctx.strokeRect(s.x, s.y, sw, sh);
-    if (sw > 20 && sh > 12) {
-      ctx.fillStyle = '#a6e3a199';
-      ctx.font = `${Math.max(9, Math.min(13, scale * 1.2))}px Segoe UI`;
-      ctx.textAlign = 'center';
-      ctx.fillText('ROAD', s.x + sw / 2, s.y + sh / 2 + 4);
-      ctx.textAlign = 'left';
+    const isSel=selected===r.id;
+    drawPoly(r.points,isSel?'#a6e3a130':'#a6e3a118',isSel?'#a6e3a1':'#a6e3a170',isSel?2:1);
+    const c=centroid(r.points); const sc=w2s(c.x,c.y);
+    const bb=bbox(r.points);
+    if (bb.w*scale>20&&bb.h*scale>12) {
+      ctx.fillStyle='#a6e3a199';
+      ctx.font=`${Math.max(9,Math.min(13,scale*1.2))}px Segoe UI`;
+      ctx.textAlign='center'; ctx.fillText('ROAD',sc.x,sc.y+4);
     }
+    if (isSel) drawHandles(r.points);
   }
 
   // Plots
   for (const pl of plots) {
-    const s = w2s(pl.x, pl.y), e = w2s(pl.x + pl.w, pl.y + pl.h);
-    const sw = e.x - s.x, sh = e.y - s.y;
-    const col = pc(pl.num);
-    const isSel = selected === pl.id;
-    ctx.fillStyle   = isSel ? col + '38' : col + '18';
-    ctx.fillRect(s.x, s.y, sw, sh);
-    ctx.strokeStyle = isSel ? col : col + 'aa';
-    ctx.lineWidth   = isSel ? 2.5 : 1.5;
-    ctx.strokeRect(s.x, s.y, sw, sh);
-
-    if (sw > 22 && sh > 16) {
-      ctx.textAlign = 'center';
-      const cx = s.x + sw / 2, cy = s.y + sh / 2;
-      const fs = Math.min(14, sw * 0.28, sh * 0.28);
-      ctx.font = `bold ${fs}px Segoe UI`;
-      ctx.fillStyle = col;
-      ctx.fillText(`Lot ${pl.num}`, cx, cy + (sh > 42 ? -fs * 0.6 : 4));
-      if (sh > 42 && sw > 36) {
-        ctx.font = `${Math.max(8, fs * 0.78)}px Segoe UI`;
-        ctx.fillStyle = col + 'cc';
-        ctx.fillText(`${pl.area.toLocaleString()} m²`, cx, cy + fs * 0.7);
-        if (sh > 60) {
-          ctx.font = `${Math.max(7, fs * 0.65)}px Segoe UI`;
-          ctx.fillStyle = col + '88';
-          ctx.fillText(`${pl.w.toFixed(1)}×${pl.h.toFixed(1)}m`, cx, cy + fs * 1.8);
+    const col=pc(pl.num); const isSel=selected===pl.id;
+    drawPoly(pl.points,isSel?col+'38':col+'18',isSel?col:col+'aa',isSel?2.5:1.5);
+    const c=centroid(pl.points); const sc=w2s(c.x,c.y);
+    const bb=bbox(pl.points); const sw=bb.w*scale,sh=bb.h*scale;
+    if (sw>22&&sh>16) {
+      ctx.textAlign='center';
+      const fs=Math.min(14,sw*0.28,sh*0.28);
+      ctx.font=`bold ${fs}px Segoe UI`; ctx.fillStyle=col;
+      ctx.fillText(`Lot ${pl.num}`,sc.x,sc.y+(sh>42?-fs*0.6:4));
+      if (sh>42&&sw>36) {
+        ctx.font=`${Math.max(8,fs*0.78)}px Segoe UI`; ctx.fillStyle=col+'cc';
+        ctx.fillText(`${pl.area.toLocaleString()} m²`,sc.x,sc.y+fs*0.7);
+        if (sh>60) {
+          ctx.font=`${Math.max(7,fs*0.65)}px Segoe UI`; ctx.fillStyle=col+'88';
+          ctx.fillText(`${bb.w.toFixed(1)}×${bb.h.toFixed(1)}m`,sc.x,sc.y+fs*1.8);
         }
       }
-      ctx.textAlign = 'left';
     }
+    if (isSel) drawHandles(pl.points);
   }
 
-  // Ghost rectangle while drawing
-  if (drawing && dStart && dCur) {
-    const s = w2s(dStart.wx, dStart.wy), e = w2s(dCur.wx, dCur.wy);
-    const rx = Math.min(s.x, e.x), ry = Math.min(s.y, e.y);
-    const rw = Math.abs(e.x - s.x), rh = Math.abs(e.y - s.y);
-    const col = (tool === 'road-h' || tool === 'road-v') ? '#a6e3a1'
-               : tool === 'plot' ? '#cba6f7' : '#89b4fa';
-    ctx.fillStyle   = col + '22';
-    ctx.fillRect(rx, ry, rw, rh);
-    ctx.strokeStyle = col;
-    ctx.lineWidth   = 1.5;
-    ctx.setLineDash([5, 3]);
-    ctx.strokeRect(rx, ry, rw, rh);
-    ctx.setLineDash([]);
-    // dimension label
-    const wm = Math.abs(dCur.wx - dStart.wx), hm = Math.abs(dCur.wy - dStart.wy);
-    ctx.fillStyle = col;
-    ctx.font = '11px Segoe UI';
-    ctx.textAlign = 'center';
-    ctx.fillText(`${wm.toFixed(1)} × ${hm.toFixed(1)} m`, rx + rw / 2, ry - 6);
-    ctx.textAlign = 'left';
+  // Ghost preview while drawing
+  if (drawing&&dStart&&dCur) {
+    const s=w2s(dStart.wx,dStart.wy),e=w2s(dCur.wx,dCur.wy);
+    const rx=Math.min(s.x,e.x),ry=Math.min(s.y,e.y);
+    const rw=Math.abs(e.x-s.x),rh=Math.abs(e.y-s.y);
+    const col=(tool==='road-h'||tool==='road-v')?'#a6e3a1':tool==='plot'?'#cba6f7':'#89b4fa';
+    ctx.fillStyle=col+'22'; ctx.fillRect(rx,ry,rw,rh);
+    ctx.strokeStyle=col; ctx.lineWidth=1.5; ctx.setLineDash([5,3]);
+    ctx.strokeRect(rx,ry,rw,rh); ctx.setLineDash([]);
+    const wm=Math.abs(dCur.wx-dStart.wx),hm=Math.abs(dCur.wy-dStart.wy);
+    ctx.fillStyle=col; ctx.font='11px Segoe UI'; ctx.textAlign='center';
+    ctx.fillText(`${wm.toFixed(1)} × ${hm.toFixed(1)} m`,rx+rw/2,ry-6);
   }
+  ctx.textAlign='left';
 
-  drawScaleBar(W, H);
+  drawScaleBar(W,H);
 }
 
-function drawGrid(W, H) {
-  const sizes = [0.5,1,2,5,10,20,50,100,200,500];
-  const gridM = sizes.find(g => g * scale >= 55) || 500;
-  const wL = (0 - offX) / scale,  wR = (W - offX) / scale;
-  const wT = (0 - offY) / scale,  wB = (H - offY) / scale;
-  const startX = Math.floor(wL / gridM) * gridM;
-  const startY = Math.floor(wT / gridM) * gridM;
-
-  ctx.strokeStyle = '#ffffff0d'; ctx.lineWidth = 1;
-  for (let wx = startX; wx <= wR + gridM; wx += gridM) {
-    const sx = wx * scale + offX;
-    ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, H); ctx.stroke();
+function drawGrid(W,H) {
+  const sizes=[0.5,1,2,5,10,20,50,100,200,500];
+  const gm=sizes.find(g=>g*scale>=55)||500;
+  const wL=(0-offX)/scale,wR=(W-offX)/scale;
+  const wT=(0-offY)/scale,wB=(H-offY)/scale;
+  const sx0=Math.floor(wL/gm)*gm,sy0=Math.floor(wT/gm)*gm;
+  ctx.strokeStyle='#ffffff0d'; ctx.lineWidth=1;
+  for (let wx=sx0;wx<=wR+gm;wx+=gm){
+    const x=wx*scale+offX; ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();
   }
-  for (let wy = startY; wy <= wB + gridM; wy += gridM) {
-    const sy = wy * scale + offY;
-    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke();
+  for (let wy=sy0;wy<=wB+gm;wy+=gm){
+    const y=wy*scale+offY; ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();
   }
-
-  // Axis labels
-  ctx.fillStyle = '#ffffff22'; ctx.font = '9px monospace';
-  for (let wx = startX; wx <= wR + gridM; wx += gridM) {
-    const sx = wx * scale + offX;
-    if (sx > 2 && sx < W - 20) ctx.fillText(wx + 'm', sx + 2, H - 4);
-  }
-  for (let wy = startY; wy <= wB + gridM; wy += gridM) {
-    const sy = wy * scale + offY;
-    if (sy > 12 && sy < H - 2) ctx.fillText(wy + 'm', 2, sy - 2);
-  }
+  ctx.fillStyle='#ffffff22'; ctx.font='9px monospace'; ctx.textAlign='left';
+  for (let wx=sx0;wx<=wR+gm;wx+=gm){const x=wx*scale+offX;if(x>2&&x<W-20)ctx.fillText(wx+'m',x+2,H-4);}
+  for (let wy=sy0;wy<=wB+gm;wy+=gm){const y=wy*scale+offY;if(y>12&&y<H-2)ctx.fillText(wy+'m',2,y-2);}
 }
 
-function drawScaleBar(W, H) {
-  const targets = [1,2,5,10,20,50,100,200,500,1000];
-  const niceM = targets.find(v => v * scale >= 80) || 1000;
-  const barPx = niceM * scale;
-  const bx = W - barPx - 14, by = H - 28;
-
-  ctx.fillStyle = '#00000070';
-  ctx.fillRect(bx - 4, by - 14, barPx + 20, 22);
-  ctx.fillStyle = '#888'; ctx.fillRect(bx, by, barPx, 5);
-  ctx.fillStyle = '#fff'; ctx.fillRect(bx, by, barPx / 2, 5);
-  ctx.fillStyle = '#fff'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
-  ctx.fillText('0', bx, by - 3);
-  ctx.fillText(niceM + 'm', bx + barPx, by - 3);
-  ctx.textAlign = 'left';
-
-  const ratio = Math.round(1000 / scale);
-  document.getElementById('st-scale').textContent = `1:${ratio}`;
+function drawScaleBar(W,H) {
+  const tgts=[1,2,5,10,20,50,100,200,500,1000];
+  const nm=tgts.find(v=>v*scale>=80)||1000;
+  const bpx=nm*scale; const bx=W-bpx-14,by=H-28;
+  ctx.fillStyle='#00000070'; ctx.fillRect(bx-4,by-14,bpx+20,22);
+  ctx.fillStyle='#888'; ctx.fillRect(bx,by,bpx,5);
+  ctx.fillStyle='#fff'; ctx.fillRect(bx,by,bpx/2,5);
+  ctx.fillStyle='#fff'; ctx.font='10px monospace'; ctx.textAlign='center';
+  ctx.fillText('0',bx,by-3); ctx.fillText(nm+'m',bx+bpx,by-3);
+  document.getElementById('st-scale').textContent=`1:${Math.round(1000/scale)}`;
 }
 
-// ── Mouse events ─────────────────────────────────────────────────
-function getPos(e) {
-  const r = canvas.getBoundingClientRect();
-  return { sx: e.clientX - r.left, sy: e.clientY - r.top };
-}
+// ── Mouse ─────────────────────────────────────────────────────────
+function getPos(e){const r=canvas.getBoundingClientRect();return{sx:e.clientX-r.left,sy:e.clientY-r.top};}
 
-canvas.addEventListener('mousedown', e => {
-  const { sx, sy } = getPos(e);
-  const { wx, wy } = s2w(sx, sy);
+canvas.addEventListener('mousedown',e=>{
+  const{sx,sy}=getPos(e);
+  const{wx,wy}=s2w(sx,sy);
 
-  if (e.button === 1 || e.button === 2 || (spaceDown && e.button === 0) || tool === 'pan') {
-    panning = true;
-    panStart = { sx, sy, ox: offX, oy: offY };
-    wrap.style.cursor = 'grabbing';
-    return;
+  // Middle-click / right-click / space → pan
+  if (e.button===1||e.button===2||(spaceDown&&e.button===0)||tool==='pan'){
+    panning=true; panStart={sx,sy,ox:offX,oy:offY};
+    wrap.style.cursor='grabbing'; return;
   }
-  if (e.button !== 0) return;
+  if (e.button!==0) return;
 
-  if (tool === 'select') {
-    let found = null;
-    for (const pl of [...plots].reverse())
-      if (wx >= pl.x && wx <= pl.x+pl.w && wy >= pl.y && wy <= pl.y+pl.h) { found = pl.id; break; }
-    if (!found)
-      for (const r of [...roads].reverse())
-        if (wx >= r.x && wx <= r.x+r.w && wy >= r.y && wy <= r.y+r.h) { found = r.id; break; }
-    selected = found;
+  if (tool==='select') {
+    // Check if clicking a node handle of selected item first
+    const ni=nodeAt(sx,sy);
+    if (ni!==null) {
+      saveSnap();
+      dragNode={itemId:selected,nodeIdx:ni};
+      return;
+    }
+    // Otherwise pick an item
+    let found=null;
+    for (const pl of [...plots].reverse()) if(ptInPoly(wx,wy,pl.points)){found=pl.id;break;}
+    if (!found) for (const r of [...roads].reverse()) if(ptInPoly(wx,wy,r.points)){found=r.id;break;}
+    if (!found&&boundary&&ptInPoly(wx,wy,boundary.points)) found=boundary.id;
+    selected=found; hoverNode=null;
     refreshUI(); draw();
     return;
   }
 
-  drawing = true;
-  dStart = { wx: snap(wx), wy: snap(wy) };
-  dCur   = { ...dStart };
+  drawing=true;
+  dStart={wx:snap(wx),wy:snap(wy)};
+  dCur={...dStart};
 });
 
-canvas.addEventListener('mousemove', e => {
-  const { sx, sy } = getPos(e);
-  const { wx, wy } = s2w(sx, sy);
-  document.getElementById('st-cursor').textContent  = `${wx.toFixed(1)}, ${wy.toFixed(1)} m`;
-  document.getElementById('coordInfo').textContent  = `${wx.toFixed(2)}, ${wy.toFixed(2)} m`;
+canvas.addEventListener('mousemove',e=>{
+  const{sx,sy}=getPos(e);
+  const{wx,wy}=s2w(sx,sy);
+  document.getElementById('st-cursor').textContent=`${wx.toFixed(1)}, ${wy.toFixed(1)} m`;
+  document.getElementById('coordInfo').textContent=`${wx.toFixed(2)}, ${wy.toFixed(2)} m`;
 
-  if (panning) {
-    offX = panStart.ox + (sx - panStart.sx);
-    offY = panStart.oy + (sy - panStart.sy);
-    draw(); return;
-  }
-  if (drawing) {
-    const p = getP();
-    let snX = snap(wx), snY = snap(wy);
-    // For road tools, constrain the cross-axis movement to show road width
-    if (tool === 'road-h') snY = snap(wy);   // free vertical snap
-    if (tool === 'road-v') snX = snap(wx);
-    dCur = { wx: snX, wy: snY };
-    draw();
-  }
-});
+  if (panning){offX=panStart.ox+(sx-panStart.sx);offY=panStart.oy+(sy-panStart.sy);draw();return;}
 
-canvas.addEventListener('mouseup', e => {
-  if (panning) {
-    panning = false;
-    wrap.style.cursor = tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair';
+  if (dragNode) {
+    const item=findItem(dragNode.itemId);
+    if (item) {
+      item.points[dragNode.nodeIdx]={x:snap(wx),y:snap(wy)};
+      const pl=plots.find(p=>p.id===dragNode.itemId);
+      if (pl) pl.area=Math.round(polyArea(pl.points));
+      refreshUI(); draw();
+    }
     return;
   }
+
+  // Update hover-node highlight when select tool is active
+  if (tool==='select'&&selected) {
+    const ni=nodeAt(sx,sy);
+    const prevIdx=hoverNode?hoverNode.nodeIdx:-1;
+    hoverNode=ni!==null?{itemId:selected,nodeIdx:ni}:null;
+    wrap.style.cursor=ni!==null?'move':'default';
+    if ((hoverNode?hoverNode.nodeIdx:-1)!==prevIdx) draw();
+  }
+
+  if (drawing){dCur={wx:snap(wx),wy:snap(wy)};draw();}
+});
+
+canvas.addEventListener('mouseup',e=>{
+  if (panning){
+    panning=false;
+    wrap.style.cursor=tool==='pan'?'grab':tool==='select'?'default':'crosshair';
+    return;
+  }
+  if (dragNode){dragNode=null;return;}
   if (!drawing) return;
-  drawing = false;
+  drawing=false;
+  if (!dStart||!dCur) return;
 
-  if (!dStart || !dCur) return;
-  const p = getP();
-  let x = Math.min(dStart.wx, dCur.wx);
-  let y = Math.min(dStart.wy, dCur.wy);
-  let w = Math.abs(dCur.wx - dStart.wx);
-  let h = Math.abs(dCur.wy - dStart.wy);
+  const p=getP();
+  let x=Math.min(dStart.wx,dCur.wx),y=Math.min(dStart.wy,dCur.wy);
+  let w=Math.abs(dCur.wx-dStart.wx),h=Math.abs(dCur.wy-dStart.wy);
 
-  if (tool === 'boundary') {
-    if (w < 1 || h < 1) return;
+  if (tool==='boundary') {
+    if (w<1||h<1) return;
     saveSnap();
-    boundary = { x, y, w, h };
-    plots = [];   // clear old plots when boundary changes
-    setMsg(`Site boundary: ${Math.round(w * h).toLocaleString()} m²`);
+    boundary={id:uid(),points:rectPts(x,y,w,h)};
+    plots=[];
+    setMsg(`Site boundary: ${Math.round(w*h).toLocaleString()} m²`);
 
-  } else if (tool === 'road-h') {
-    // Horizontal road: user drags X extent; Y = drag midpoint; height = roadWidth
-    const centerY = (dStart.wy + dCur.wy) / 2;
-    let ry = snap(centerY) - p.roadW / 2;
-    let rh = p.roadW;
-    let rx = x, rw = w;
-    if (rw < 1) return;
-    if (boundary) {
-      rx = Math.max(rx, boundary.x);
-      rw = Math.min(x + w, boundary.x + boundary.w) - rx;
-      ry = Math.max(ry, boundary.y);
-      rh = Math.min(Math.min(rh, boundary.y + boundary.h - ry), p.roadW);
+  } else if (tool==='road-h') {
+    const cy=(dStart.wy+dCur.wy)/2;
+    let ry=snap(cy)-p.roadW/2,rh=p.roadW,rx=x,rw=w;
+    if (rw<1) return;
+    if (boundary){
+      const bb=bbox(boundary.points);
+      rx=Math.max(rx,bb.x); rw=Math.min(x+w,bb.x+bb.w)-rx;
+      ry=Math.max(ry,bb.y); rh=Math.min(rh,bb.y+bb.h-ry);
     }
-    if (rw < 0.5 || rh < 0.1) return;
-    saveSnap();
-    roads.push({ id: uid(), x: rx, y: ry, w: rw, h: rh, dir: 'h' });
+    if (rw<0.5||rh<0.1) return;
+    saveSnap(); roads.push({id:uid(),points:rectPts(rx,ry,rw,rh),dir:'h'});
     setMsg(`Horizontal road: ${rw.toFixed(1)} × ${rh.toFixed(1)} m`);
 
-  } else if (tool === 'road-v') {
-    const centerX = (dStart.wx + dCur.wx) / 2;
-    let rx = snap(centerX) - p.roadW / 2;
-    let rw = p.roadW;
-    let ry = y, rh = h;
-    if (rh < 1) return;
-    if (boundary) {
-      ry = Math.max(ry, boundary.y);
-      rh = Math.min(y + h, boundary.y + boundary.h) - ry;
-      rx = Math.max(rx, boundary.x);
-      rw = Math.min(Math.min(rw, boundary.x + boundary.w - rx), p.roadW);
+  } else if (tool==='road-v') {
+    const cx=(dStart.wx+dCur.wx)/2;
+    let rx=snap(cx)-p.roadW/2,rw=p.roadW,ry=y,rh=h;
+    if (rh<1) return;
+    if (boundary){
+      const bb=bbox(boundary.points);
+      ry=Math.max(ry,bb.y); rh=Math.min(y+h,bb.y+bb.h)-ry;
+      rx=Math.max(rx,bb.x); rw=Math.min(rw,bb.x+bb.w-rx);
     }
-    if (rh < 0.5 || rw < 0.1) return;
-    saveSnap();
-    roads.push({ id: uid(), x: rx, y: ry, w: rw, h: rh, dir: 'v' });
+    if (rh<0.5||rw<0.1) return;
+    saveSnap(); roads.push({id:uid(),points:rectPts(rx,ry,rw,rh),dir:'v'});
     setMsg(`Vertical road: ${rw.toFixed(1)} × ${rh.toFixed(1)} m`);
 
-  } else if (tool === 'plot') {
-    if (w < p.minFront * 0.5 || h < p.minDepth * 0.5) return;
-    const area = Math.round(w * h);
-    const maxN = plots.length ? Math.max(...plots.map(pl => pl.num)) + 1 : p.startN;
-    saveSnap();
-    plots.push({ id: uid(), num: maxN, x, y, w, h, area, manual: true });
+  } else if (tool==='plot') {
+    if (w<p.minFront*0.5||h<p.minDepth*0.5) return;
+    const area=Math.round(w*h);
+    const maxN=plots.length?Math.max(...plots.map(pl=>pl.num))+1:p.startN;
+    saveSnap(); plots.push({id:uid(),num:maxN,points:rectPts(x,y,w,h),area,manual:true});
     setMsg(`Lot ${maxN}: ${area.toLocaleString()} m²`);
   }
 
-  dStart = null; dCur = null;
+  dStart=null; dCur=null;
   refreshUI(); draw();
 });
 
-canvas.addEventListener('wheel', e => {
+canvas.addEventListener('wheel',e=>{
   e.preventDefault();
-  const { sx, sy } = getPos(e);
-  const factor = e.deltaY < 0 ? 1.13 : 0.87;
-  const newScale = Math.max(0.3, Math.min(300, scale * factor));
-  const { wx, wy } = s2w(sx, sy);
-  scale = newScale;
-  offX  = sx - wx * scale;
-  offY  = sy - wy * scale;
+  const{sx,sy}=getPos(e);
+  const f=e.deltaY<0?1.13:0.87;
+  const ns=Math.max(0.3,Math.min(300,scale*f));
+  const{wx,wy}=s2w(sx,sy);
+  scale=ns; offX=sx-wx*scale; offY=sy-wy*scale;
   draw();
-}, { passive: false });
+},{passive:false});
 
-canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
 
 // ── Keyboard ─────────────────────────────────────────────────────
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
-  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
-  if ((e.ctrlKey || e.metaKey) && e.key === 'y') { e.preventDefault(); redo(); }
-  if (e.key === 's') setTool('select');
-  if (e.key === 'b') setTool('boundary');
-  if (e.key === 'h') setTool('road-h');
-  if (e.key === 'v') setTool('road-v');
-  if (e.key === 'p') setTool('plot');
-  if (e.key === 'Escape') { selected = null; refreshUI(); draw(); }
-  if ((e.key === 'Delete' || e.key === 'Backspace') && selected) {
+document.addEventListener('keydown',e=>{
+  if (e.target.tagName==='INPUT') return;
+  if (e.code==='Space'){spaceDown=true;e.preventDefault();}
+  if ((e.ctrlKey||e.metaKey)&&e.key==='z'){e.preventDefault();undo();}
+  if ((e.ctrlKey||e.metaKey)&&e.key==='y'){e.preventDefault();redo();}
+  if (e.key==='s') setTool('select');
+  if (e.key==='b') setTool('boundary');
+  if (e.key==='h') setTool('road-h');
+  if (e.key==='v') setTool('road-v');
+  if (e.key==='p') setTool('plot');
+  if (e.key==='f') fitView();
+  if (e.key==='Escape'){selected=null;dragNode=null;hoverNode=null;refreshUI();draw();}
+  if ((e.key==='Delete'||e.key==='Backspace')&&selected&&!dragNode){
     saveSnap();
-    plots = plots.filter(pl => pl.id !== selected);
-    roads = roads.filter(r  => r.id  !== selected);
-    selected = null;
-    refreshUI(); draw();
+    plots=plots.filter(pl=>pl.id!==selected);
+    roads=roads.filter(r=>r.id!==selected);
+    if (boundary&&boundary.id===selected) boundary=null;
+    selected=null; refreshUI(); draw();
   }
-  if (e.key === 'f') fitView();
 });
-document.addEventListener('keyup', e => {
-  if (e.code === 'Space') spaceDown = false;
-});
+document.addEventListener('keyup',e=>{if(e.code==='Space')spaceDown=false;});
 
-// ── Fit view ─────────────────────────────────────────────────────
-function fitView() {
-  const W = canvas.width, H = canvas.height;
-  if (!boundary) { scale = 8; offX = 80; offY = 80; draw(); return; }
-  const pad = 60;
-  scale = Math.min((W - pad*2) / boundary.w, (H - pad*2) / boundary.h, 30);
-  offX  = (W - boundary.w * scale) / 2 - boundary.x * scale;
-  offY  = (H - boundary.h * scale) / 2 - boundary.y * scale;
+// ── Fit view ──────────────────────────────────────────────────────
+function fitView(){
+  const W=canvas.width,H=canvas.height;
+  if (!boundary){scale=8;offX=80;offY=80;draw();return;}
+  const bb=bbox(boundary.points);
+  const pad=60;
+  scale=Math.min((W-pad*2)/bb.w,(H-pad*2)/bb.h,30);
+  offX=(W-bb.w*scale)/2-bb.x*scale;
+  offY=(H-bb.h*scale)/2-bb.y*scale;
   draw();
 }
 
-// ── Resize ───────────────────────────────────────────────────────
-function resize() {
-  canvas.width  = wrap.clientWidth;
-  canvas.height = wrap.clientHeight;
-  draw();
-}
-window.addEventListener('resize', resize);
+// ── Resize ────────────────────────────────────────────────────────
+function resize(){canvas.width=wrap.clientWidth;canvas.height=wrap.clientHeight;draw();}
+window.addEventListener('resize',resize);
 
-// ── Expose globals ────────────────────────────────────────────────
-window.T = { setTool, autoLayout, clearAll, exportDXF, undo, redo, fitView };
-window.delRoad = delRoad;
-window.delPlot = delPlot;
+// ── Globals ───────────────────────────────────────────────────────
+window.T={setTool,autoLayout,clearAll,exportDXF,undo,redo,fitView};
+window.delRoad=delRoad;
+window.delPlot=delPlot;
 
-// ── Boot ─────────────────────────────────────────────────────────
-saveSnap();
-resize();
-refreshUI();
-setMsg('Tip: Draw a site boundary, add roads, then click Auto-Layout Plots.');
+// ── Boot ──────────────────────────────────────────────────────────
+saveSnap(); resize(); refreshUI();
+setMsg('Select a shape to drag its corner nodes. Draw boundary → roads → Auto-Layout.');
 </script>
 </body>
 </html>
